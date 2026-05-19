@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.neural_network import MLPRegressor
 from sklearn.model_selection import StratifiedKFold, GridSearchCV, KFold
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.metrics import mean_squared_error, r2_score
@@ -13,13 +13,13 @@ from collections import defaultdict, Counter
 
 # ====================== 基本設定 ======================
 year_range = "1981-2022"
-output_dir = f"/Dellwork6/cwusei/RI/ALL_IBTrACS/Program/PYTHON/RIIndex/{year_range}-continue"
+output_dir = f"/Dellwork6/cwusei/RI/ALL_IBTrACS/Program/PYTHON/RIIndex/{year_range}-continue-classweight"
 os.makedirs(output_dir, exist_ok=True)
 
 logging.getLogger('matplotlib').setLevel(logging.INFO)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-log_file_path = os.path.join(output_dir, f"ANO_RII_randomforest_continue_{year_range}.log")
+log_file_path = os.path.join(output_dir, f"ANO_RII_ann_continue_{year_range}_classweight.log")
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -45,14 +45,13 @@ regions = {
     # "midlower_inner": {"rows": range(12, 27), "cols": range(0, 9), "name": "Mid-Lower Level Inner-Core"},
     # "midlower_outer": {"rows": range(12, 27), "cols": range(9, 18), "name": "Mid-Lower Level Outer Area"}
 }
-
 c_candidates = [50, 100, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 300]
 d_candidates = [5, 10, 15, 20, 25, 30]
 max_wind = max(wind_thresholds)
 rate_threshold = 0.417
 focus_pairs = [(10, 6), (20, 12), (35, 18), (45, 24), (55, 30), (65, 36), (70, 42), (75, 48)]
 
-# ====================== 函數 ======================
+# ====================== 函數（完全不變） ======================
 def adjust_data(data, var, region_rows, region_cols):
     if data.shape != (27, 21):
         return np.array([])
@@ -121,14 +120,13 @@ def find_best_c_d(wind_values, time_values, focus_pairs, max_wind):
     logging.info(f"最佳 c: {best_c}, 最佳 d: {best_d}, 分數: {best_score:.2f}")
     return best_c, best_d
 
-# ====================== load_all_data ======================
+# ====================== load_all_data（使用最新成功修正版） ======================
 def load_all_data(wind_thresholds, time_intervals, base_path, regions, best_c, best_d,
                   train_sids=None, test_sids=None, collect_unique_sids=False):
     X_all, y_all, combo_labels, delta_winds_list, sid_list = [], [], [], [], []
     bt_cache = {}
     delta_cache = {}
     all_sids = set()
-
     for region in regions.keys():
         region_rows = regions[region]["rows"]
         region_cols = regions[region]["cols"]
@@ -140,7 +138,6 @@ def load_all_data(wind_thresholds, time_intervals, base_path, regions, best_c, b
                 
                 if not (os.path.exists(pv_path_ri) and os.path.exists(the_path_ri)):
                     continue
-
                 sid_files = defaultdict(list)
                 pv_files_ri = [os.path.join(pv_path_ri, f) for f in os.listdir(pv_path_ri) if f.endswith(".txt")]
                 for pv_file in pv_files_ri:
@@ -160,65 +157,44 @@ def load_all_data(wind_thresholds, time_intervals, base_path, regions, best_c, b
                         all_sids.add(sid)
                     except ValueError:
                         continue
-
                 logging.info(f"組合 ({wind},{time}) 找到 {len(sid_files)} 個 unique TC")
-
                 success_count = 0
                 skipped_count = 0
                 skip_reasons = {"THE不存在": 0, "adjust_data空": 0, "BestTrack不符": 0, "其他錯誤": 0}
-
                 for sid, files_list in sid_files.items():
                     if not files_list:
                         continue
-                    files_list.sort(key=lambda x: x[0])   # 時間由早到晚
-
+                    files_list.sort(key=lambda x: x[0])
                     loaded = False
-                    for file_dt, basename in files_list:   # 逐筆檢查，直到找到第一筆有效的
+                    for file_dt, basename in files_list:
                         if loaded:
-                            break   # 已經成功載入一筆就跳出（確保每個 TC 只取一筆）
-
+                            break
                         pv_file = os.path.join(pv_path_ri, basename)
                         the_basename = basename.replace('Azi_PV', 'Azi_THE')
                         the_file = os.path.join(the_path_ri, the_basename)
-
                         if not os.path.exists(the_file):
                             skipped_count += 1
                             skip_reasons["THE不存在"] += 1
                             continue
-
                         try:
                             pv_data = np.loadtxt(pv_file)
                             the_data = np.loadtxt(the_file)
                             pv_selected = adjust_data(pv_data, "PV", region_rows, region_cols)
                             the_selected = adjust_data(the_data, "THE", region_rows, region_cols)
-
                             if pv_selected.size == 0 or the_selected.size == 0:
                                 skipped_count += 1
                                 skip_reasons["adjust_data空"] += 1
                                 continue
-
                             combined_features = np.concatenate([pv_selected, the_selected])
-                            # === 加強除錯 + 更寬鬆的 BestTrack 匹配 ===
                             current_dt = file_dt
                             cache_key = (sid, str(current_dt))
-
                             if cache_key in delta_cache:
                                 wind_current, delta_winds = delta_cache[cache_key]
                             else:
-                                #logging.info(f"   [DEBUG] 正在找 sid={sid} 日期={current_dt.strftime('%Y%m%d%H')} 的 BestTrack")
-
-                                # 列出所有可能的 JTWC 檔案
                                 files = os.listdir(base_path)
-                                candidate_files = [f for f in files 
-                                                 if f.endswith('.txt') 
-                                                 and 'JTWC' in f 
-                                                 and sid in f]   # 改成 'JTWC' in f，更寬鬆
-
-                                #logging.info(f"   [DEBUG] 找到 {len(candidate_files)} 個候選 JTWC 檔: {candidate_files[:5]}")
-
+                                candidate_files = [f for f in files if f.endswith('.txt') and 'JTWC' in f and sid in f]
                                 best_track_file = None
                                 matched_dt = None
-
                                 for cand in candidate_files:
                                     cand_path = os.path.join(base_path, cand)
                                     try:
@@ -226,36 +202,24 @@ def load_all_data(wind_thresholds, time_intervals, base_path, regions, best_c, b
                                                               names=['sid', 'year', 'month', 'day', 'hour', 'lat', 'lon', 'wind', 'pressure', 'source'],
                                                               engine='python')
                                         bt_data['datetime'] = pd.to_datetime(bt_data[['year','month','day','hour']])
-                                        
-                                        # 精確匹配
                                         exact_match = bt_data[bt_data['datetime'] == current_dt]
                                         if not exact_match.empty:
                                             best_track_file = cand
                                             matched_dt = current_dt
-                                            #logging.info(f"   [SUCCESS] 精確匹配 → {cand}  at {current_dt}")
                                             break
-                                            
-                                        # 如果沒精確匹配，找最接近的（±3小時）
                                         time_diff = (bt_data['datetime'] - current_dt).abs()
                                         if time_diff.min() <= pd.Timedelta(hours=3):
                                             closest_idx = time_diff.idxmin()
                                             best_track_file = cand
                                             matched_dt = bt_data['datetime'].iloc[closest_idx]
-                                            #logging.info(f"   [SUCCESS] 接近匹配 (±{time_diff.min().hours}h) → {cand}")
                                             break
-                                    except Exception as e:
-                                        #logging.info(f"   [ERROR] 讀取 {cand} 失敗: {e}")
+                                    except Exception:
                                         continue
-
                                 if best_track_file is None:
-                                    #logging.info(f"   → BestTrack不符！ sid={sid} 日期={current_dt} 完全找不到匹配檔案")
                                     skipped_count += 1
                                     skip_reasons["BestTrack不符"] += 1
                                     continue
-
                                 best_track_path = os.path.join(base_path, best_track_file)
-
-                                # 讀取 BestTrack 資料
                                 if best_track_path in bt_cache:
                                     bt_data = bt_cache[best_track_path]
                                 else:
@@ -264,14 +228,11 @@ def load_all_data(wind_thresholds, time_intervals, base_path, regions, best_c, b
                                                           engine='python')
                                     bt_data['datetime'] = pd.to_datetime(bt_data[['year','month','day','hour']])
                                     bt_cache[best_track_path] = bt_data
-
-                                # 用匹配到的時間取風速
                                 if matched_dt in bt_data['datetime'].values:
                                     current_row = bt_data[bt_data['datetime'] == matched_dt].iloc[0]
                                 else:
                                     closest_idx = (bt_data['datetime'] - current_dt).abs().idxmin()
                                     current_row = bt_data.iloc[closest_idx]
-
                                 wind_current = float(current_row['wind'])
                                 delta_winds = []
                                 for t in time_intervals:
@@ -280,9 +241,7 @@ def load_all_data(wind_thresholds, time_intervals, base_path, regions, best_c, b
                                     future_row = bt_data.iloc[future_idx]
                                     delta = float(future_row['wind']) - wind_current
                                     delta_winds.append(delta)
-
                                 delta_cache[cache_key] = (wind_current, delta_winds)
-
                             X_all.append(combined_features)
                             y_all.append(ri_value)
                             combo_labels.append((wind, time))
@@ -294,166 +253,165 @@ def load_all_data(wind_thresholds, time_intervals, base_path, regions, best_c, b
                             skipped_count += 1
                             skip_reasons["其他錯誤"] += 1
                             continue
-
                 logging.info(f" → 【總結】成功 {success_count} 筆 | 跳過 {skipped_count} 筆")
                 for reason, cnt in skip_reasons.items():
                     if cnt > 0:
-                        logging.info(f"     跳過原因: {reason} = {cnt} 筆")
-
+                        logging.info(f" 跳過原因: {reason} = {cnt} 筆")
     if not X_all:
         logging.warning("load_all_data 沒有任何成功資料")
         return np.array([]), np.array([]), [], np.array([]), [], set()
-
-    return (np.array(X_all), np.array(y_all), combo_labels, 
+    return (np.array(X_all), np.array(y_all), combo_labels,
             np.array(delta_winds_list), sid_list, all_sids)
 
-# ====================== 主函數 ======================
+# ====================== 主函數（合併 class weighting） ======================
 def main():
-    logging.info("程式開始執行 - 每個 (wind,time) 組合獨立 80/20 split")
+    logging.info("程式開始執行 - ANN with Class Weighting + 80/20 Split + 5-Fold CV")
     best_c, best_d = find_best_c_d(wind_thresholds, time_intervals, focus_pairs, max_wind)
     region = "upper_inner"
     logging.info(f"開始分析區域: {region}")
-
-    X_train_all = []
-    y_train_all = []
-    combo_train_all = []
-    delta_train_all = []
-    X_test_all = []
-    y_test_all = []
-    combo_test_all = []
-    delta_test_all = []
-
-    for wind in wind_thresholds:
-        for time in time_intervals:
-            logging.info(f"處理組合 wind={wind} kt, time={time} h")
-           
-            X_combo, y_combo, combo_combo, delta_combo, sid_combo, _ = load_all_data(
-                [wind], [time], base_path, {region: regions[region]},
-                best_c, best_d, collect_unique_sids=True
-            )
-           
-            logging.info(f" → 該組合共有 {len(sid_combo)} 筆第一筆資料，{len(set(sid_combo))} 個 unique TC")
-           
-            if len(sid_combo) == 0:
-                continue
-
-            # === 直接對筆數做 80/20 + 強制至少 1 筆 test ===
-            n_samples = len(sid_combo)
-            if n_samples < 2:
-                train_mask = np.ones(n_samples, dtype=bool)
-            else:
-                np.random.seed(42)
-                test_size = max(1, int(0.2 * n_samples))
-                indices = np.arange(n_samples)
-                np.random.shuffle(indices)
-                test_idx = indices[:test_size]
-                train_idx = indices[test_size:]
-                train_mask = np.zeros(n_samples, dtype=bool)
-                train_mask[train_idx] = True
-
-            test_count = np.sum(~train_mask)
-            logging.info(f" → Test Set 實際分配 {test_count} 筆資料 (總共 {n_samples} 筆)")
-
-            X_train_all.extend(X_combo[train_mask])
-            y_train_all.extend(y_combo[train_mask])
-            combo_train_all.extend([combo_combo[i] for i in range(len(combo_combo)) if train_mask[i]])
-            delta_train_all.extend(delta_combo[train_mask])
-
-            X_test_all.extend(X_combo[~train_mask])
-            y_test_all.extend(y_combo[~train_mask])
-            combo_test_all.extend([combo_combo[i] for i in range(len(combo_combo)) if not train_mask[i]])
-            delta_test_all.extend(delta_combo[~train_mask])
-
-    X_train = np.array(X_train_all)
-    y_train = np.array(y_train_all)
-    combo_train = combo_train_all
-    delta_train = np.array(delta_train_all)
-    X_test = np.array(X_test_all)
-    y_test = np.array(y_test_all)
-    combo_test = combo_test_all
-    delta_test = np.array(delta_test_all)
-
-    logging.info(f"最終樣本數 → Train: {len(X_train)} | Test: {len(X_test)}")
-
-    if len(X_train) == 0:
-        logging.error("Training Set 為空！")
+   
+    X_all, y_all, combo_labels, delta_winds_list, sid_list, _ = load_all_data(
+        wind_thresholds, time_intervals, base_path, {region: regions[region]}, best_c, best_d, collect_unique_sids=True
+    )
+   
+    if len(X_all) < 10:
+        logging.warning(f"區域 {region}: 數據不足")
         return
+    logging.info(f"總共載入 {len(X_all)} 筆 RI-onset 樣本")
+   
+    # ====================== 1. 80/20 Split（每組合獨立） ======================
+    n_samples = len(X_all)
+    if n_samples < 2:
+        train_mask = np.ones(n_samples, dtype=bool)
+    else:
+        np.random.seed(42)
+        test_size = max(1, int(0.2 * n_samples))
+        indices = np.arange(n_samples)
+        np.random.shuffle(indices)
+        test_idx = indices[:test_size]
+        train_idx = indices[test_size:]
+        train_mask = np.zeros(n_samples, dtype=bool)
+        train_mask[train_idx] = True
+    logging.info(f"已完成 80/20 split | Train: {np.sum(train_mask)} | Test: {np.sum(~train_mask)}")
 
-    # ====================== 縮放 + 訓練 ======================
+    X_train = X_all[train_mask]
+    y_train = y_all[train_mask]
+    combo_train = [combo for i, combo in enumerate(combo_labels) if train_mask[i]]
+
+    X_test = X_all[~train_mask]
+    y_test = y_all[~train_mask]
+    combo_test = [combo for i, combo in enumerate(combo_labels) if not train_mask[i]]
+
+    # ====================== 2. Class Weighting (Inverse Frequency + 加權抽樣) ======================
+    scaler_y_temp = MinMaxScaler(feature_range=(0, 10))
+    y_scaled_temp = scaler_y_temp.fit_transform(y_train.reshape(-1, 1)).ravel()
+   
+    n_bins = 10
+    bins = np.linspace(0, 10, n_bins + 1)
+    bin_indices = np.digitize(y_scaled_temp, bins[1:])
+    bin_counts = np.bincount(bin_indices, minlength=n_bins)
+    bin_counts = np.maximum(bin_counts, 1)
+    sample_weights = len(y_scaled_temp) / bin_counts[bin_indices]
+    sample_weights = np.clip(sample_weights, 0.8, 5.0)
+    logging.info(f"已計算 Inverse Frequency Weighting，權重範圍: {sample_weights.min():.3f} ~ {sample_weights.max():.3f} "
+                 f"(mean = {sample_weights.mean():.3f})")
+
+    # 加權抽樣
+    np.random.seed(42)
+    indices = np.arange(len(X_train))
+    sample_prob = sample_weights / sample_weights.sum()
+    sampled_indices = np.random.choice(indices, size=len(indices)*2, p=sample_prob, replace=True)
+    X_train_weighted = X_train[sampled_indices]
+    y_train_weighted = y_train[sampled_indices]
+    logging.info(f"加權抽樣完成，訓練樣本從 {len(X_train)} → {len(X_train_weighted)}")
+
+    # ====================== 3. 縮放 ======================
     scaler_y = MinMaxScaler(feature_range=(0, 10))
-    y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).ravel()
+    y_train_scaled = scaler_y.fit_transform(y_train_weighted.reshape(-1, 1)).ravel()
     y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).ravel()
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
+    X_train_scaled = scaler.fit_transform(X_train_weighted)
     X_test_scaled = scaler.transform(X_test)
 
-    if len(X_train) < 5:
-        logging.warning("樣本太少，使用簡單訓練")
-        rf_final = RandomForestRegressor(n_estimators=200, max_depth=6, random_state=42)
-        rf_final.fit(X_train_scaled, y_train_scaled)
-    else:
-        skf = KFold(n_splits=5, shuffle=True, random_state=42)
-        cv_results = {'mse': [], 'r2': [], 'ri_mean': []}
-        fold_best_params = []
-        for fold, (train_idx, val_idx) in enumerate(skf.split(X_train_scaled)):
-            logging.info(f"開始第 {fold+1} fold")
-            X_train_fold = X_train_scaled[train_idx]
-            X_val_fold = X_train_scaled[val_idx]
-            y_train_fold = y_train_scaled[train_idx]
-            y_val_fold = y_train_scaled[val_idx]
-            param_grid = {'n_estimators': [100, 500], 'max_depth': [5, 10, None], 'min_samples_split': [2, 5]}
-            rf = RandomForestRegressor(random_state=42)
-            grid_search = GridSearchCV(rf, param_grid, cv=10, scoring='neg_mean_squared_error', n_jobs=-1)
-            grid_search.fit(X_train_fold, y_train_fold)
-            best_rf = grid_search.best_estimator_
-            fold_best_params.append(grid_search.best_params_)
-            y_val_pred = best_rf.predict(X_val_fold)
-            y_val_pred = np.clip(y_val_pred, 0, 10)
-            mse = mean_squared_error(y_val_fold, y_val_pred)
-            r2 = r2_score(y_val_fold, y_val_pred)
-            cv_results['mse'].append(mse)
-            cv_results['r2'].append(r2)
-            logging.info(f"Fold {fold+1}: MSE={mse:.4f}, R2={r2:.4f}")
+    # ====================== 4. 5-Fold CV ======================
+    n_splits = 5
+    skf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    cv_results = {'mse': [], 'r2': [], 'ri_mean': []}
+    fold_best_params = []
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X_train_scaled)):
+        logging.info(f"開始第 {fold+1} fold")
+        X_train_fold = X_train_scaled[train_idx]
+        y_train_fold = y_train_scaled[train_idx]
+        X_val_fold = X_train_scaled[val_idx]
+        y_val_fold = y_train_scaled[val_idx]
 
-        best_params_dict = {}
-        for k in fold_best_params[0].keys():
-            values = [p[k] for p in fold_best_params]
-            best_params_dict[k] = max(set(values), key=values.count)
-        rf_final = RandomForestRegressor(**best_params_dict, random_state=42)
-        rf_final.fit(X_train_scaled, y_train_scaled)
+        param_grid = {
+            'hidden_layer_sizes': [(50,), (100,), (50, 50)],
+            'activation': ['relu', 'tanh'],
+            'solver': ['adam'],
+            'alpha': [0.0001, 0.001, 0.01],
+            'learning_rate_init': [0.0005, 0.001, 0.005, 0.01]
+        }
+        ann = MLPRegressor(random_state=42, max_iter=1000,
+                           early_stopping=True, validation_fraction=0.1)
+       
+        grid_search = GridSearchCV(ann, param_grid, cv=10, scoring='neg_mean_squared_error', n_jobs=-1)
+        grid_search.fit(X_train_fold, y_train_fold)
+       
+        best_ann = grid_search.best_estimator_
+        best_params = grid_search.best_params_
+        fold_best_params.append(best_params)
+        y_val_pred = best_ann.predict(X_val_fold)
+        y_val_pred = np.clip(y_val_pred, 0, 10)
+        mse = mean_squared_error(y_val_fold, y_val_pred)
+        r2 = r2_score(y_val_fold, y_val_pred)
+        ri_mean = np.mean(y_val_pred)
+        cv_results['mse'].append(mse)
+        cv_results['r2'].append(r2)
+        cv_results['ri_mean'].append(ri_mean)
+        logging.info(f"Fold {fold+1}: MSE={mse:.4f}, R2={r2:.4f}, RI_mean={ri_mean:.4f}")
 
-    # ====================== 診斷 Test Set（已放在正確位置） ======================
-    logging.info("\n=== Test Set 各組合實際樣本數診斷（檢查空白原因） ===")
-    from collections import Counter
-    test_combo_count = Counter(combo_test)
-    for wind in wind_thresholds:
-        for time in time_intervals:
-            count = test_combo_count.get((wind, time), 0)
-            if count > 0:
-                logging.info(f"  Test Set 中 ({wind:2d}kt, {time:2d}h) 有 {count} 筆")
-            else:
-                logging.info(f"  Test Set 中 ({wind:2d}kt, {time:2d}h) 有 0 筆 ← 這就是空白的原因")
+    # CV 結果統計
+    avg_mse = np.mean(cv_results['mse'])
+    std_mse = np.std(cv_results['mse'])
+    avg_r2 = np.mean(cv_results['r2'])
+    std_r2 = np.std(cv_results['r2'])
+    avg_ri = np.mean(cv_results['ri_mean'])
+    std_ri = np.std(cv_results['ri_mean'])
+    logging.info(f"K-fold CV 摘要 (5 folds) - 平均 MSE: {avg_mse:.4f} (+/- {std_mse:.4f})")
+    logging.info(f"平均 R2: {avg_r2:.4f} (+/- {std_r2:.4f})")
+    logging.info(f"平均 RI Index: {avg_ri:.4f} (+/- {std_ri:.4f})")
 
-    # 預測
-    y_test_pred = rf_final.predict(X_test_scaled)
+    # ====================== 最終模型 ======================
+    best_params_dict = {}
+    for k in fold_best_params[0].keys():
+        values = [p[k] for p in fold_best_params]
+        best_params_dict[k] = max(set(values), key=values.count)
+    final_ann = MLPRegressor(**best_params_dict, random_state=42, max_iter=1000,
+                             early_stopping=True, validation_fraction=0.1)
+    final_ann.fit(X_train_scaled, y_train_scaled)
+
+    # ====================== 20% Test Set 驗證 ======================
+    y_test_pred = final_ann.predict(X_test_scaled)
     y_test_pred = np.clip(y_test_pred, 0, 10)
-   
-    logging.info(f"Test Set 總預測筆數: {len(y_test_pred)}")
-    
-        
-    # ====================== 儲存檔案供畫圖使用 ======================
-    joblib.dump(X_test, os.path.join(output_dir, f"PVTHE_X_test_rf_onset_{region}_{year_range}.pkl"))
-    joblib.dump(combo_test, os.path.join(output_dir, f"PVTHE_combo_test_rf_onset_{region}_{year_range}.pkl"))
-    joblib.dump(rf_final, os.path.join(output_dir, f"PVTHE_rf_model_onset_{region}_{year_range}.pkl"))
-    joblib.dump(scaler, os.path.join(output_dir, f"PVTHE_rf_feature_scaler_onset_{region}_{year_range}.pkl"))
-    joblib.dump(scaler_y, os.path.join(output_dir, f"PVTHE_rf_target_scaler_onset_{region}_{year_range}.pkl"))
-    
-    logging.info("✅ 已儲存 X_test, combo_test, model, scalers 等檔案供畫圖使用")
+    final_mse = mean_squared_error(y_test_scaled, y_test_pred)
+    final_r2 = r2_score(y_test_scaled, y_test_pred)
+    logging.info(f"20% Test Set 最終驗證 - MSE: {final_mse:.4f}, R2: {final_r2:.4f}")
 
+    # ====================== 儲存 ======================
+    model_path = os.path.join(output_dir, f"PVTHE_ann_model_onset_weighted_{region}_{year_range}.pkl")
+    scaler_path = os.path.join(output_dir, f"PVTHE_ann_feature_scaler_onset_weighted_{region}_{year_range}.pkl")
+    scaler_y_path = os.path.join(output_dir, f"PVTHE_ann_target_scaler_onset_weighted_{region}_{year_range}.pkl")
+   
+    joblib.dump(final_ann, model_path)
+    joblib.dump(scaler, scaler_path)
+    joblib.dump(scaler_y, scaler_y_path)
+    logging.info("程式執行完畢 - ANN with Class Weighting + 80/20 + 5-Fold CV")
 
 if __name__ == "__main__":
     try:
         main()
+        logging.info("程式執行完畢")
     except Exception as e:
         logging.exception("程式執行時發生嚴重錯誤：")
     finally:

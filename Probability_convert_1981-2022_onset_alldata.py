@@ -1,107 +1,93 @@
 import os
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_squared_error
 import joblib
 import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.stats import gaussian_kde
 from matplotlib.lines import Line2D
 from datetime import datetime, timedelta
+from sklearn.preprocessing import MinMaxScaler
 
-# 設置輸出目錄
+# ====================== 基本設定 ======================
 output_dir = "/Dellwork6/cwusei/RI/ALL_IBTrACS/Program/PYTHON/RIIndex/M1981-2022_onset_test"
 os.makedirs(output_dir, exist_ok=True)
 
-# 設置日誌，確保立即寫入
 log_file_path = os.path.join(output_dir, "validation_log_1981-2022_test.txt")
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file_path, mode='w', encoding='utf-8', delay=False),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler(log_file_path, mode='w', encoding='utf-8', delay=False),
+              logging.StreamHandler()]
 )
-logging.info("腳本開始執行")
 
-# 定義參數 (與訓練程式碼一致)
+def flush_log():
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+logging.info("=== 腳本開始執行 ===")
+flush_log()
+
+# ====================== RI 計算參數 ======================
 wind_thresholds = list(range(10, 105, 5))
 time_intervals = [6, 12, 18, 24, 30, 36, 42, 48]
-variables = {
-    "PV": {"rows": range(0, 27), "cols": range(0, 21)},
-    "THE": {"rows": range(0, 27), "cols": range(0, 21)}
-}
+variables = {"PV": {"rows": range(0, 27), "cols": range(0, 21)}, "THE": {"rows": range(0, 27), "cols": range(0, 21)}}
 regions = {
-    "upper_inner": {"rows": range(2, 12), "cols": range(0, 9), "name": "Upper Level Inner-Core"}
-}
-test_year_range = "1981-2022"  # 使用訓練年的測試集
+    "upper_inner": {"rows": range(2, 12), "cols": range(0, 9), "name": "Upper Level Inner-Core"},
+    # "upper_outer": {"rows": range(2, 12), "cols": range(9, 18), "name": "Upper Level Outer Area"},
+    # "middle_inner": {"rows": range(12, 21), "cols": range(0, 9), "name": "Middle Level Inner-Core"},
+    # "middle_outer": {"rows": range(12, 21), "cols": range(9, 18), "name": "Middle Level Outer Area"},
+    #"lower_inner": {"rows": range(21, 27), "cols": range(0, 9), "name": "Lower Level Inner-Core"},
+    # "lower_outer": {"rows": range(21, 27), "cols": range(9, 18), "name": "Lower Level Outer Area"},
+    # "midupper_inner": {"rows": range(12, 27), "cols": range(0, 9), "name": "Mid-Lower Level Inner-Core"},
+    # "midlower_outer": {"rows": range(12, 27), "cols": range(9, 18), "name": "Mid-Lower Level Outer Area"}
+    }
+
+test_year_range = "1981-2022"
 test_base_path = "/Dellwork6/cwusei/RI/ALL_IBTrACS/Program/JTWC-1981-2022"
 train_pkl_dir = "/Dellwork6/cwusei/RI/ALL_IBTrACS/Program/PYTHON/RIIndex/1981-2022-continue"
 best_track_path = "/Dellwork6/cwusei/RI/ALL_IBTrACS/ibtracs.WP.list.v04r01.csv"
 
-# 假設最佳 c 和 d 與訓練一致
-best_c = 210
-best_d = 25
+c = 210
+d = 25
 max_wind = max(wind_thresholds)
 
-# 載入訓練模型和縮放器 .pkl 檔案
+def calculate_ri(wind, time_h, c=210, d=25, max_wind=100):
+    return wind * (c / (time_h + d)) * (1 + wind / max_wind)
+
+# ====================== 載入模型與 feature_scaler ======================
 model_files = {
-    "random_forest": os.path.join(train_pkl_dir, "PVTHE_rf_model_kfold_upper_inner_1981-2022.pkl"),
-    "svr": os.path.join(train_pkl_dir, "PVTHE_svr_model_kfold_upper_inner_1981-2022.pkl"),
-    "ann": os.path.join(train_pkl_dir, "PVTHE_ann_model_kfold_upper_inner_1981-2022.pkl")
+    "rf": os.path.join(train_pkl_dir, "PVTHE_rf_model_onset_upper_inner_1981-2022.pkl"),
+    "svr": os.path.join(train_pkl_dir, "PVTHE_svr_model_onset_upper_inner_1981-2022.pkl"),
+    "ann": os.path.join(train_pkl_dir, "PVTHE_ann_model_onset_upper_inner_1981-2022.pkl")
 }
 feature_scaler_files = {
-    "random_forest": os.path.join(train_pkl_dir, "PVTHE_rf_feature_scaler_kfold_upper_inner_1981-2022.pkl"),
-    "svr": os.path.join(train_pkl_dir, "PVTHE_svr_feature_scaler_kfold_upper_inner_1981-2022.pkl"),
-    "ann": os.path.join(train_pkl_dir, "PVTHE_ann_feature_scaler_kfold_upper_inner_1981-2022.pkl")
-}
-target_scaler_files = {
-    "random_forest": os.path.join(train_pkl_dir, "PVTHE_rf_target_scaler_kfold_upper_inner_1981-2022.pkl"),
-    "svr": os.path.join(train_pkl_dir, "PVTHE_svr_target_scaler_kfold_upper_inner_1981-2022.pkl"),
-    "ann": os.path.join(train_pkl_dir, "PVTHE_ann_target_scaler_kfold_upper_inner_1981-2022.pkl")
+    "rf": os.path.join(train_pkl_dir, "PVTHE_rf_feature_scaler_onset_upper_inner_1981-2022.pkl"),
+    "svr": os.path.join(train_pkl_dir, "PVTHE_svr_feature_scaler_onset_upper_inner_1981-2022.pkl"),
+    "ann": os.path.join(train_pkl_dir, "PVTHE_ann_feature_scaler_onset_upper_inner_1981-2022.pkl")
 }
 
-logging.info("載入模型和縮放器...")
-# 載入訓練模型和縮放器
-rf_model = None
-svr_model = None
-ann_model = None
-try:
-    rf_model = joblib.load(model_files["random_forest"])
-    rf_feature_scaler = joblib.load(feature_scaler_files["random_forest"])
-    rf_target_scaler = joblib.load(target_scaler_files["random_forest"])
-    logging.info("Random Forest 模型和縮放器載入成功")
-except FileNotFoundError as e:
-    logging.error(f"Random Forest 模型載入失敗: {e}")
-except Exception as e:
-    logging.error(f"Random Forest 模型載入異常: {e}")
-try:
-    svr_model = joblib.load(model_files["svr"])
-    svr_feature_scaler = joblib.load(feature_scaler_files["svr"])
-    svr_target_scaler = joblib.load(target_scaler_files["svr"])
-    logging.info("SVR 模型和縮放器載入成功")
-except FileNotFoundError as e:
-    logging.error(f"SVR 模型載入失敗: {e}")
-except Exception as e:
-    logging.error(f"SVR 模型載入異常: {e}")
-try:
-    ann_model = joblib.load(model_files["ann"])
-    ann_feature_scaler = joblib.load(feature_scaler_files["ann"])
-    ann_target_scaler = joblib.load(target_scaler_files["ann"])
-    logging.info("ANN 模型和縮放器載入成功")
-except FileNotFoundError as e:
-    logging.error(f"ANN 模型載入失敗: {e}")
-except Exception as e:
-    logging.error(f"ANN 模型載入異常: {e}")
+rf_model = svr_model = ann_model = None
+rf_feature_scaler = svr_feature_scaler = ann_feature_scaler = None
 
-# RI 計算函數 (與訓練一致，但測試時不需用)
-def calculate_ri(wind, time, c, d, max_wind):
-    return wind * (c / (time + d)) * (1 + wind / max_wind)
+for name in ["rf", "svr", "ann"]:
+    try:
+        locals()[f"{name}_model"] = joblib.load(model_files[name])
+        locals()[f"{name}_feature_scaler"] = joblib.load(feature_scaler_files[name])
+        logging.info(f"✅ {name.upper()} 模型與 feature_scaler 載入成功")
+        flush_log()
+    except Exception as e:
+        logging.error(f"❌ {name.upper()} 載入失敗: {e}")
+        flush_log()
 
-# 數據調整函數 (與訓練一致)
+# ====================== 資料調整函數 ======================
 def adjust_data(data, var, region_rows, region_cols):
+    if not isinstance(data, np.ndarray):
+        logging.error(f"adjust_data 收到非 numpy array 類型: {type(data)}")
+        return np.array([])
+   
+    data = np.asarray(data, dtype=np.float64)
+   
     if data.shape != (27, 21):
         return np.array([])
     outer_cols = list(range(18, 21))
@@ -125,98 +111,94 @@ def adjust_data(data, var, region_rows, region_cols):
         return np.array([])
     return selected_data.flatten()
 
-# 修改: 生成測試資料函數 (載入所有資料點，排除每個 TC 的第一筆，每個 dt 只處理一次)
+# ====================== 生成測試資料 ======================
 def generate_test_data(time_intervals, test_base_path, regions):
     X_test = []
     delta_winds_list = []
     region = "upper_inner"
     if region not in regions:
         logging.error(f"區域 {region} 未定義")
+        flush_log()
         return np.array([]), []
     region_rows = regions[region]["rows"]
     region_cols = regions[region]["cols"]
     logging.info(f"開始生成測試資料，區域: {regions[region]['name']}")
-    delta_cache = {}  # 緩存 delta_winds 和 wind_current，key: (sid, str(current_dt))
-    bt_data_cache = {}  # 緩存 per SID 的 bt_data_sid
-    # 載入整個 ibtracs CSV 只一次
+    flush_log()
+    delta_cache = {}
+    bt_data_cache = {}
     bt_data = pd.read_csv(best_track_path, low_memory=False)
-    # 資料在 Whole 資料夾
+    logging.info("已載入 ibtracs 最佳路徑資料")
+    flush_log()
     whole_path = os.path.join(test_base_path, "Whole")
     logging.info(f"Whole 路徑: {whole_path}")
+    flush_log()
     if os.path.exists(whole_path):
-        # 掃描檔案
         pv_files = [os.path.join(whole_path, f) for f in os.listdir(whole_path) if f.startswith('Azi_PV-') and f.endswith(".txt")]
         logging.info(f"找到 PV 檔案數: {len(pv_files)}")
-        # 先收集所有檔案的 sid 和 dt 資訊，按 SID 群組並排序
+        flush_log()
         sid_files = {}
         for pv_file in pv_files:
             f = os.path.basename(pv_file)
             parts = f.replace('.txt', '').split('-')
             if len(parts) != 3 or parts[0] != 'Azi_PV':
-                logging.warning(f"無效檔案名格式: {f}")
                 continue
             timestr = parts[1]
             sid = parts[2]
             if len(timestr) != 10:
-                logging.warning(f"無效時間字符串: {timestr}")
                 continue
             year = int(timestr[0:4])
             month = int(timestr[4:6])
             day = int(timestr[6:8])
             hour = int(timestr[8:10])
             current_dt = datetime(year, month, day, hour, 0, 0)
-            if sid not in sid_files:
-                sid_files[sid] = []
-            sid_files[sid].append((current_dt, pv_file))
-        # 對每個 SID 排序檔案（按時間）
+            sid_files.setdefault(sid, []).append((current_dt, pv_file))
         for sid in sid_files:
             sid_files[sid].sort(key=lambda x: x[0])
-        # 處理每個 SID，從第二筆開始
         for sid, files in sid_files.items():
             if len(files) < 2:
-                logging.info(f"跳過 SID {sid}: 只有 {len(files)} 筆資料，無法排除第一筆")
+                logging.info(f"跳過 SID {sid}: 只有 {len(files)} 筆資料")
+                flush_log()
                 continue
-            # 預載 per SID 的 bt_data
             if sid not in bt_data_cache:
                 bt_data_sid = bt_data[bt_data['SID'].str.endswith(sid)].copy()
                 bt_data_sid['ISO_TIME'] = pd.to_datetime(bt_data_sid['ISO_TIME'])
                 if bt_data_sid.empty:
                     logging.warning(f"未找到 SID {sid} 在 best track CSV")
+                    flush_log()
                     continue
                 bt_data_cache[sid] = bt_data_sid
-            for idx in range(1, len(files)):  # 從索引 1 開始 (第二筆)
+            for idx in range(1, len(files)):
                 current_dt, pv_file = files[idx]
-                # 假設 the_file 檔名相同
-                f_base = os.path.basename(pv_file)
-                the_file = os.path.join(whole_path, f_base.replace('Azi_PV', 'Azi_THE'))
+                the_file = os.path.join(whole_path, os.path.basename(pv_file).replace('Azi_PV', 'Azi_THE'))
                 if not os.path.exists(the_file):
-                    logging.warning(f"缺少 THE 檔案 for {pv_file}")
+                    logging.warning(f"缺少 THE 檔案: {the_file}")
+                    flush_log()
                     continue
                 try:
-                    # 用 genfromtxt 處理無效值 (空字串變 NaN)
-                    pv_data = np.genfromtxt(pv_file, delimiter='', invalid_raise=False, filling_values=np.nan)
-                    the_data = np.genfromtxt(the_file, delimiter='', invalid_raise=False, filling_values=np.nan)
-                    logging.info(f"載入檔案成功: {pv_file} (SID {sid}, 非第一筆)")
+                    pv_df = pd.read_csv(pv_file, sep=r'\s+', header=None, dtype=float, engine='python', na_values=['', ' ', '-'])
+                    the_df = pd.read_csv(the_file, sep=r'\s+', header=None, dtype=float, engine='python', na_values=['', ' ', '-'])
+                    pv_data = pv_df.values
+                    the_data = the_df.values
+                    if pv_data.shape != (27, 21) or the_data.shape != (27, 21):
+                        logging.warning(f"形狀異常 {os.path.basename(pv_file)}，跳過")
+                        continue
                     pv_selected = adjust_data(pv_data, "PV", region_rows, region_cols)
                     the_selected = adjust_data(the_data, "THE", region_rows, region_cols)
                     if pv_selected.size == 0 or the_selected.size == 0:
-                        logging.warning(f"選取數據為空: {pv_file}")
                         continue
                     combined_features = np.concatenate([pv_selected, the_selected])
                     cache_key = (sid, str(current_dt))
                     if cache_key in delta_cache:
                         wind_current, delta_winds = delta_cache[cache_key]
-                        logging.info(f"使用緩存數據: {current_dt}_{sid}")
                     else:
                         bt_data_sid = bt_data_cache[sid]
                         current_row = bt_data_sid[bt_data_sid['ISO_TIME'] == current_dt]
                         if current_row.empty:
                             closest_idx = (bt_data_sid['ISO_TIME'] - current_dt).abs().argmin()
                             current_row = bt_data_sid.iloc[closest_idx]
-                            logging.warning(f"當前時間不在 best track 中: {current_dt}, 使用最近時間: {current_row['ISO_TIME']}")
                         else:
                             current_row = current_row.iloc[0]
-                        wind_current = float(current_row['USA_WIND']) if not pd.isna(current_row['USA_WIND']) else float(current_row['USA_WIND'])
+                        wind_current = float(current_row.get('USA_WIND', 0))
                         delta_winds = []
                         for t in time_intervals:
                             future_dt = current_dt + timedelta(hours=t)
@@ -224,228 +206,212 @@ def generate_test_data(time_intervals, test_base_path, regions):
                             if future_row.empty:
                                 closest_idx = (bt_data_sid['ISO_TIME'] - future_dt).abs().argmin()
                                 future_row = bt_data_sid.iloc[closest_idx]
-                                logging.warning(f"未來時間不在 best track 中: {future_dt}, 使用最近時間: {future_row['ISO_TIME']}")
                             else:
                                 future_row = future_row.iloc[0]
-                            wind_future = float(future_row['USA_WIND']) if not pd.isna(future_row['USA_WIND']) else float(future_row['USA_WIND'])
-                            delta = wind_future - wind_current
-                            delta_winds.append(delta)
+                            wind_future = float(future_row.get('USA_WIND', 0))
+                            delta_winds.append(wind_future - wind_current)
                         delta_cache[cache_key] = (wind_current, delta_winds)
-                    # 成功計算 delta 後，才 append X
                     X_test.append(combined_features)
                     delta_winds_list.append(delta_winds)
+                    #logging.info(f"✅ 成功處理完成: {os.path.basename(pv_file)}")
                 except Exception as e:
-                    logging.error(f"處理檔案時出錯 {pv_file}: {e}")
+                    #logging.error(f"處理檔案時出錯 {pv_file}: {type(e).__name__} - {e}")
+                    flush_log()
                     continue
-    else:
-        logging.warning("資料夾不存在: Whole 等")
     logging.info(f"總測試樣本數: {len(X_test)}")
+    flush_log()
     return np.array(X_test), delta_winds_list
 
-# 主程式 (無變)
-def main():
-    logging.info(f"開始驗證 {test_year_range} 測試集資料與 1981–2022 模型的預測偏差")
-    if not any([rf_model, svr_model, ann_model]):
-        logging.error("所有模型載入失敗，程式終止")
+# ====================== 核心處理函數 ======================
+def process_model(model_name, X_test, delta_winds_list, feature_scaler, model):
+    logging.info(f"🔄 開始處理 {model_name} ...")
+    if model is None or feature_scaler is None:
+        logging.error(f"❌ {model_name} 模型或 scaler 未就緒")
+        flush_log()
         return
-    # 生成測試資料 (所有資料點，排除每個 TC 的第一筆)
-    logging.info("開始生成測試資料...")
-    X_test, delta_winds_list = generate_test_data(time_intervals, test_base_path, regions)
-    if len(X_test) == 0:
-        logging.warning("測試數據生成失敗或數量不足，無法進行驗證")
-        return
-    logging.info(f"成功生成測試數據，樣本數: {len(X_test)}")
-    # 定義通用函數來處理每個模型的計算和繪圖
-    def process_model(model_name, X_test, delta_winds_list, feature_scaler, target_scaler, model):
-        # 計算預測值
+
+    try:
         if model_name == "ANN":
-            y_test_pred = model.predict(feature_scaler.transform(X_test)).flatten()
+            y_pred = model.predict(feature_scaler.transform(X_test)).flatten()
         else:
-            y_test_pred = model.predict(feature_scaler.transform(X_test))
-        logging.info(f"{model_name} y_test_pred min: {np.min(y_test_pred):.2f}, max: {np.max(y_test_pred):.2f}")
-        y_test_pred = np.clip(y_test_pred, 0, 10)  # 限制在 MinMaxScaler(0,10) 範圍
-        logging.info(f"{model_name} y_test_pred after clip min: {np.min(y_test_pred):.2f}, max: {np.max(y_test_pred):.2f}")
-        mean_ri = np.mean(y_test_pred)
-        std_ri = np.std(y_test_pred)
+            y_pred = model.predict(feature_scaler.transform(X_test))
+
+        y_pred = np.clip(y_pred, 0, 10)
+
+        mean_ri = np.mean(y_pred)
+        std_ri = np.std(y_pred)
         high_threshold = mean_ri + std_ri
         low_threshold = mean_ri - std_ri
-        logging.info(f"{model_name} on {test_year_range}: Mean RI Index = {mean_ri:.2f}, "
-                     f"High Threshold = {high_threshold:.2f}, Low Threshold = {low_threshold:.2f}")
-        # 計算機率部分
-        y_pred_ri = y_test_pred
-        bins = np.linspace(np.min(y_pred_ri), np.max(y_pred_ri), 11)
-        bin_indices = np.digitize(y_pred_ri, bins) - 1
-        # 新增: 檢查 y_pred_ri 分布 - 保存 histogram 圖
-        logging.info(f"y_pred_ri 平均: {np.mean(y_pred_ri):.2f}, 標準差: {np.std(y_pred_ri):.2f}")
-        plt.figure(figsize=(8, 6))
-        plt.hist(y_pred_ri, bins=20, edgecolor='black')
-        plt.title(f"RI Index Prediction Distribution ({model_name}, {test_year_range})")
-        plt.xlabel("Predicted RI Index")
-        plt.ylabel("Frequency")
-        plt.savefig(os.path.join(output_dir, f"RI_Index_hist_{model_name}_{test_year_range}.png"), dpi=300)
-        plt.close()
-        logging.info(f"RI Index histogram saved to {os.path.join(output_dir, f'RI_Index_hist_{model_name}_{test_year_range}.png')}")
-        # 新增: 計算每個 bin 的樣本數 (用 np.histogram)
-        counts, _ = np.histogram(y_pred_ri, bins=bins)
-        for i, count in enumerate(counts):
-            logging.info(f"Bin {i+1} [{bins[i]:.2f}-{bins[i+1]:.2f}) 的樣本數: {count}")
-        # 修改 bin_labels 加 (n=count)
+
+        logging.info(f"{model_name} Mean RI Index = {mean_ri:.3f} ± {std_ri:.3f} | High = {high_threshold:.3f}, Low = {low_threshold:.3f}")
+
+        # ====================== 計算真實 target IR 並 scale 到 0~10 ======================
+        scaler_y = MinMaxScaler(feature_range=(0, 10))
+        y_true_raw = []
+        for s in range(len(delta_winds_list)):
+            idx_24 = time_intervals.index(24) if 24 in time_intervals else 3
+            delta_24 = delta_winds_list[s][idx_24]
+            if np.isnan(delta_24):
+                delta_24 = 0.0
+            true_ir_raw = calculate_ri(delta_24, 24, c, d, max_wind)
+            y_true_raw.append(true_ir_raw)
+
+        y_true_raw = np.array(y_true_raw).reshape(-1, 1)
+        y_true = scaler_y.fit_transform(y_true_raw).ravel()
+
+        mse = np.mean((y_pred - y_true) ** 2)
+        ss_res = np.sum((y_pred - y_true) ** 2)
+        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
+
+        logging.info(f"{model_name} MSE = {mse:.4f}, R² = {r2:.4f}")
+        flush_log()
+
+        # ====================== KDE 繪圖 ======================
+
+            
+        bins = np.linspace(np.min(y_pred), np.max(y_pred), 11)
+            #bin_indices = np.digitize(y_test_pred, bins) - 1
+            #counts, _ = np.histogram(y_test_pred, bins=bins)
+            
+            # 使用 pd.cut 更穩健地分配 bin
+        bin_labels = [f"Bin {k+1} [{bins[k]:.2f}-{bins[k+1]:.2f})" for k in range(10)]
+        
+            # 強制把 y_test_pred 分配到正確的 bin
+        df_temp = pd.DataFrame({'y_pred': y_pred})
+        df_temp['bin_idx'] = pd.cut(df_temp['y_pred'], bins=bins, labels=False, include_lowest=True)
+        
+        counts = np.zeros(10, dtype=int)
+        for i in range(10):
+            counts[i] = (df_temp['bin_idx'] == i).sum()
         bin_labels = [f"Bin {k+1} [{bins[k]:.2f}-{bins[k+1]:.2f}) (n={counts[k]})" for k in range(10)]
-        num_bins = 10
-        num_times = len(time_intervals)
-        num_winds = len(wind_thresholds)
-        avg_delta_matrix = np.full((num_bins, num_times), np.nan)
-        prob_matrix = np.full((num_bins, num_times, num_winds), np.nan)
-        delta_winds_array = np.array(delta_winds_list)  # 轉成 array (num_samples, num_times)
-        for i in range(num_bins):
-            mask = (bin_indices == i)
-            if np.any(mask):
-                delta_sub = delta_winds_array[mask]
-                for j in range(num_times):
-                    valid_deltas = delta_sub[:, j][~np.isnan(delta_sub[:, j])]
-                    if len(valid_deltas) > 0:
-                        avg_delta_matrix[i, j] = np.mean(valid_deltas)
-                    for k in range(num_winds):
-                        thresh = wind_thresholds[k]
-                        occurred = (delta_sub[:, j] >= thresh) & (~np.isnan(delta_sub[:, j]))
-                        num_valid = np.sum(~np.isnan(delta_sub[:, j]))
-                        if num_valid > 0:
-                            prob_matrix[i, j, k] = np.sum(occurred) / num_valid
-        # 平均風變化熱圖 (使用新 bin_labels)
-        plt.figure(figsize=(12, 8))
-        sns.heatmap(avg_delta_matrix, xticklabels=time_intervals, yticklabels=bin_labels,
-                    cmap="coolwarm", annot=True, fmt=".2f")
-        plt.title(f"Average Wind Change by RI Index Bin and Time Interval ({model_name}, {test_year_range})", fontsize=16)
-        plt.xlabel("Time Interval (h)", fontsize=14)
-        plt.ylabel("RI Index Bin (Range with Count)", fontsize=14)
-        plt.tick_params(axis='both', labelsize=10)
-        plt.savefig(os.path.join(output_dir, f"Avg_Delta_Wind_heatmap_{model_name}_{test_year_range}.png"), dpi=300)
-        plt.close()
-        logging.info(f"Average Delta Wind heatmap saved to {os.path.join(output_dir, f'Avg_Delta_Wind_heatmap_{model_name}_{test_year_range}.png')}")
-        # 新增: 機率熱圖 (為每個風速閾值產生一個熱圖，使用新 bin_labels)
-        for k, wind_thresh in enumerate(wind_thresholds):
-            plt.figure(figsize=(12, 8))
-            sns.heatmap(prob_matrix[:, :, k], xticklabels=time_intervals, yticklabels=bin_labels,
-                        cmap="YlGnBu", annot=True, fmt=".2f", vmin=0, vmax=1)
-            plt.title(f"RI Probability (Wind >= {wind_thresh} kt) by Bin and Time ({model_name}, {test_year_range})", fontsize=16)
-            plt.xlabel("Time Interval (h)", fontsize=14)
-            plt.ylabel("RI Index Bin (Range with Count)", fontsize=14)
-            plt.tick_params(axis='both', labelsize=10)
-            plt.savefig(os.path.join(output_dir, f"RI_Prob_heatmap_wind{wind_thresh}_{model_name}_{test_year_range}.png"), dpi=300)
-            plt.close()
-            logging.info(f"RI Probability heatmap for wind {wind_thresh} saved to {os.path.join(output_dir, f'RI_Prob_heatmap_wind{wind_thresh}_{model_name}_{test_year_range}.png')}")
-        # 繪製 KDE 圖
+
         data = []
         for s in range(len(delta_winds_list)):
-            bin_idx = bin_indices[s]
-            if bin_idx < 0 or bin_idx >= num_bins:
-                continue
+                #bin_idx = bin_indices[s]
+            bin_idx = df_temp['bin_idx'].iloc[s]
+                #if bin_idx < 0 or bin_idx >= 10:
+            if pd.isna(bin_idx) or bin_idx < 0 or bin_idx >= 10:
+                   continue
             bin_label = bin_labels[bin_idx]
             for j, t in enumerate(time_intervals):
                 delta = delta_winds_list[s][j]
                 if np.isnan(delta):
                     continue
                 data.append({'bin': bin_label, 'time': t, 'delta_wind': delta})
+
         df = pd.DataFrame(data)
-        # 新增: 檢查 df 中每個 bin 的數據點數 (考慮 NaN 過濾後)
-        if not df.empty:
-            for i in range(num_bins):
-                bin_df = df[df['bin'] == bin_labels[i]]
-                logging.info(f"{bin_labels[i]} 的 delta_wind 數據點數 (after NaN filter): {len(bin_df)}")
         if not df.empty:
             df['time_jitter'] = df['time'] + np.random.uniform(-0.4, 0.4, len(df))
-            plt.figure(figsize=(10, 10))
-            threshold = 0.5
+
+            plt.figure(figsize=(11, 11))
             levels = np.linspace(0.5, 0.9, 5)
+            colors = sns.color_palette("coolwarm", 10)
+            
+            # 設定不同機率等值線的粗細（越高機率越粗）
             linewidths = [1.0, 1.5, 2.0, 2.5, 3.0]
-            colors = sns.color_palette("coolwarm", num_bins)
-            for i in range(num_bins):
+
+            collection_indices = []
+            for i in range(10):
                 bin_df = df[df['bin'] == bin_labels[i]]
-                if bin_df.empty:
-                    logging.info(f"Skipping KDE for {bin_labels[i]}: no data points")
+                n_points = len(bin_df)
+                if n_points == 0:
+                    collection_indices.append(None)
                     continue
-                sns.kdeplot(data=bin_df, x='time_jitter', y='delta_wind', levels=levels, thresh=threshold,
-                            color=colors[i], linewidths=linewidths, common_norm=False)
+                sns.kdeplot(data=bin_df, x='time_jitter', y='delta_wind',
+                            levels=levels, thresh=0.5, color=colors[i],
+                            linewidths=linewidths,
+                            common_norm=False)
+
+
+                collection_indices.append(len(plt.gca().collections) - 1)
+
+            # 關鍵修正：把 n<5 的 KDE 線條改成虛線
+            for i, coll_idx in enumerate(collection_indices):
+                if coll_idx is not None and counts[i] < 5:
+                    try:
+                        plt.gca().collections[coll_idx].set_linestyle('--')
+                    except:
+                        pass   # 防止偶爾出錯
+                        
+            # 參考線與圖例
+            plt.axhline(y=0, color='black', linestyle='--', linewidth=1.5, alpha=0.8, label='Zero Wind Change (0 kt)')
+            plt.axhline(y=30, color='red', linestyle='--', linewidth=1.8, alpha=0.85, label='Traditional RI Threshold (30 kt)')
+            plt.axvline(x=24, color='red', linestyle='--', linewidth=1.8, alpha=0.85, label='24 hours')
+
+            bin_legend_elements = []
+            for i in range(10):
+                ls = '--' if counts[i] < 5 else '-'
+                bin_legend_elements.append(Line2D([0], [0], color=colors[i], lw=2, linestyle=ls, label=bin_labels[i]))
+
+            bin_legend = plt.legend(handles=bin_legend_elements, title='Predicted IR Index Bins', loc='upper right', fontsize=9, title_fontsize=11)
+            plt.gca().add_artist(bin_legend)
+            
+
+            # 機率等值線粗細圖例（左上方，避免與 Bin 圖例重疊）
+            thickness_legend_elements = []
+            for i, lw in enumerate(linewidths):
+                thickness_legend_elements.append(
+                    Line2D([0], [0], color='gray', lw=lw, linestyle='-', label=f'{levels[i]*100:.0f}%')
+                )
+
+            thickness_legend = plt.legend(handles=thickness_legend_elements,
+                                          title='Probability Levels',
+                                          loc='upper left', fontsize=9, title_fontsize=11)
+            plt.gca().add_artist(thickness_legend)
+            # 參考線圖例（右下方，避免重疊）
+            plt.legend(loc='lower right', fontsize=9)
+            
             plt.xticks(time_intervals)
             plt.yticks(np.arange(-70, max(wind_thresholds) + 10, 10))
             plt.ylim(-70, max(wind_thresholds) + 10)
-            bin_legend_elements = [Line2D([0], [0], color=colors[i], lw=2, label=bin_labels[i]) for i in range(num_bins)]
-            bin_legend = plt.legend(handles=bin_legend_elements, title='Bins (Ranges with Count)', loc='upper right', fontsize=10, title_fontsize=12)
-            plt.gca().add_artist(bin_legend)
-            thickness_legend_elements = [Line2D([0], [0], color='black', lw=linewidths[k], label=f'{levels[k]*100:.0f}%') for k in range(len(linewidths))]
-            plt.legend(handles=thickness_legend_elements, title='Probability Levels', loc='upper left', fontsize=10, title_fontsize=12)
             plt.xlabel("Time Interval (h)", fontsize=14)
             plt.ylabel("Wind Change (kt)", fontsize=14)
-            plt.title(f"2D KDE and RI Index Bin ({model_name}, {test_year_range})", fontsize=16)
+            plt.title(f"2D KDE by Predicted IR Index Bins ({model_name}, upper_inner, {test_year_range})", fontsize=16)
             plt.tick_params(axis='both', labelsize=10)
-            plt.savefig(os.path.join(output_dir, f"Wind_Change_KDE_by_Bin_and_Time_{model_name}_{test_year_range}.png"), dpi=300)
+
+            save_path = os.path.join(output_dir, f"Wind_Change_KDE_by_Bin_{model_name}_upper_inner_{test_year_range}.png")
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
             plt.close()
-            logging.info(f"Wind Change KDE plot saved to {os.path.join(output_dir, f'Wind_Change_KDE_by_Bin_and_Time_{model_name}_{test_year_range}.png')}")
-        return high_threshold, low_threshold
-    # 進行預測
-    results = {}
-    if rf_model:
-        try:
-            if len(X_test) == 0:
-                logging.error("Random Forest 測試集資料為空，跳過處理")
-            else:
-                high_threshold_rf, low_threshold_rf = process_model(
-                    "Random_Forest", X_test, delta_winds_list,
-                    rf_feature_scaler, rf_target_scaler, rf_model
-                )
-                results["random_forest"] = (high_threshold_rf, low_threshold_rf)
-        except Exception as e:
-            logging.error(f"Random Forest 預測錯誤: {e}")
-    if svr_model:
-        try:
-            if len(X_test) == 0:
-                logging.error("SVR 測試集資料為空，跳過處理")
-            else:
-                high_threshold_svr, low_threshold_svr = process_model(
-                    "SVR", X_test, delta_winds_list,
-                    svr_feature_scaler, svr_target_scaler, svr_model
-                )
-                results["svr"] = (high_threshold_svr, low_threshold_svr)
-        except Exception as e:
-            logging.error(f"SVR 預測錯誤: {e}")
-    if ann_model:
-        try:
-            if len(X_test) == 0:
-                logging.error("ANN 測試集資料為空，跳過處理")
-            else:
-                high_threshold_ann, low_threshold_ann = process_model(
-                    "ANN", X_test, delta_winds_list,
-                    ann_feature_scaler, ann_target_scaler, ann_model
-                )
-                results["ann"] = (high_threshold_ann, low_threshold_ann)
-        except Exception as e:
-            logging.error(f"ANN 預測錯誤: {e}")
-    # 計算與訓練閾值的偏差
-    rf_train_high = 4.29
-    rf_train_low = 1.71
-    svr_train_high = 4.63
-    svr_train_low = 1.34
-    ann_train_high = 4.72
-    ann_train_low = 1.33
-    if "random_forest" in results:
-        high_dev_rf = ((results["random_forest"][0] - rf_train_high) / rf_train_high) * 100
-        low_dev_rf = ((results["random_forest"][1] - rf_train_low) / rf_train_low) * 100
-        logging.info(f"Random Forest High Threshold Deviation: {high_dev_rf:.2f}%, Low Threshold Deviation: {low_dev_rf:.2f}%")
-        print(f"Random Forest High Threshold Deviation: {high_dev_rf:.2f}%")
-        print(f"Random Forest Low Threshold Deviation: {low_dev_rf:.2f}%")
-    if "svr" in results:
-        high_dev_svr = ((results["svr"][0] - svr_train_high) / svr_train_high) * 100
-        low_dev_svr = ((results["svr"][1] - svr_train_low) / svr_train_low) * 100
-        logging.info(f"SVR High Threshold Deviation: {high_dev_svr:.2f}%, Low Threshold Deviation: {low_dev_svr:.2f}%")
-        print(f"SVR High Threshold Deviation: {high_dev_svr:.2f}%")
-        print(f"SVR Low Threshold Deviation: {low_dev_svr:.2f}%")
-    if "ann" in results:
-        high_dev_ann = ((results["ann"][0] - ann_train_high) / ann_train_high) * 100
-        low_dev_ann = ((results["ann"][1] - ann_train_low) / ann_train_low) * 100
-        logging.info(f"ANN High Threshold Deviation: {high_dev_ann:.2f}%, Low Threshold Deviation: {low_dev_ann:.2f}%")
-        print(f"ANN High Threshold Deviation: {high_dev_ann:.2f}%")
-        print(f"ANN Low Threshold Deviation: {low_dev_ann:.2f}%")
+            logging.info(f"✅ {model_name} KDE 圖已儲存至 {save_path}")
+            flush_log()
+
+    except Exception as e:
+        logging.error(f"❌ {model_name} 處理錯誤: {e}", exc_info=True)
+        flush_log()
+
+
+# ====================== 主程式 ======================
+def main():
+    logging.info(f"開始驗證 {test_year_range} 測試集資料與 1981–2022 模型")
+    flush_log()
+
+    if not any([rf_model, svr_model, ann_model]):
+        logging.error("所有模型載入失敗，程式終止")
+        flush_log()
+        return
+
+    logging.info("開始生成測試資料...")
+    flush_log()
+    X_test, delta_winds_list = generate_test_data(time_intervals, test_base_path, regions)
+
+    if len(X_test) == 0:
+        logging.warning("測試數據生成失敗或數量不足")
+        flush_log()
+        return
+
+    logging.info(f"成功生成測試數據，樣本數: {len(X_test)}")
+    flush_log()
+
+    for display_name, mdl, f_scaler in [("RF", rf_model, rf_feature_scaler),
+                                       ("SVR", svr_model, svr_feature_scaler),
+                                       ("ANN", ann_model, ann_feature_scaler)]:
+        if mdl is not None:
+            logging.info(f"=== 開始處理 {display_name} ===")
+            process_model(display_name, X_test, delta_winds_list, f_scaler, mdl)
+
+    logging.info("驗證完成！請檢查 log 檔案與 KDE 圖檔")
+    flush_log()
 
 if __name__ == "__main__":
     main()
-    logging.info("驗證完成。請檢查日誌檔案以獲取詳細結果。")
